@@ -17,6 +17,7 @@ from models.experimental import MixConv2d, CrossConv, C3
 from utils.general import check_anchor_order, make_divisible, check_file, set_logging
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
     select_device, copy_attr
+from utils.ar1_utils import *
 
 
 class Detect(nn.Module):
@@ -64,6 +65,9 @@ class Detect(nn.Module):
 class Model(nn.Module):
     def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None):  # model, input channels, number of classes
         super(Model, self).__init__()
+
+        self.ewcData = None
+        self.synData = None
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
         else:  # is *.yaml

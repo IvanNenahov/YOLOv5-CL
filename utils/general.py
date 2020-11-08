@@ -26,6 +26,8 @@ from tqdm import tqdm
 
 from utils.google_utils import gsutil_getsize
 from utils.torch_utils import is_parallel, init_torch_seeds
+from utils.ar1_utils import *
+
 
 # Set printoptions
 torch.set_printoptions(linewidth=320, precision=5, profile='long')
@@ -477,7 +479,7 @@ class BCEBlurWithLogitsLoss(nn.Module):
         return loss.mean()
 
 
-def compute_loss(p, targets, model):  # predictions, targets, model
+def compute_loss(p, targets, model, reg_lambda=0):  # predictions, targets, model
     device = targets.device
     lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
     tcls, tbox, indices, anchors = build_targets(p, targets, model)  # targets
@@ -536,7 +538,10 @@ def compute_loss(p, targets, model):  # predictions, targets, model
     lcls *= h['cls'] * s
     bs = tobj.shape[0]  # batch size
 
-    loss = lbox + lobj + lcls
+    if reg_lambda != 0:
+        ewcloss = compute_ewc_loss(model, model.ewcData, lambd=reg_lambda)
+    loss = lbox + lobj + lcls + ewcloss
+
     return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
 
 

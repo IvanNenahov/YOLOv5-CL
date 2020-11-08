@@ -30,6 +30,8 @@ from utils.general import (
     check_git_status, check_img_size, increment_dir, print_mutation, plot_evolution, set_logging, init_seeds)
 from utils.google_utils import attempt_download
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts
+from utils.ar1_utils import *
+
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,12 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         if any(x in k for x in freeze):
             print('freezing %s' % k)
             v.requires_grad = False
+
+    if opt.reg_lambda != 0:
+        # the regularization is based on Synaptic Intelligence as described in the
+        # paper. ewcData is a list of two elements (best parametes, importance)
+        # while synData is a dictionary with all the trajectory data needed by SI
+        model.ewcData, model.synData = create_syn_data(model)
 
     # Optimizer
     nbs = 64  # nominal batch size
@@ -185,6 +193,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     for core_batch in range(11):
         # Trainloader
 
+        if opt.reg_lambda != 0:
+            init_batch(model, model.ewcData, model.synData)
+
         print(f'------------CORE50 itertaion №:{core_batch}------------')
         dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                                 hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect,
@@ -271,6 +282,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 ni = i + nb * epoch  # number integrated batches (since train start)
                 imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
+                if opt.reg_lambda != 0:
+                    pre_update(model, model.synData)
+
                 # Warmup
                 if ni <= nw:
                     xi = [0, nw]  # x interp
@@ -305,6 +319,10 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 # Optimize
                 if ni % accumulate == 0:
                     scaler.step(optimizer)  # optimizer.step
+
+                    if opt.reg_lambda != 0:
+                        post_update(model, model.synData)
+
                     scaler.update()
                     optimizer.zero_grad()
                     if ema:
@@ -392,6 +410,10 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             # end epoch ----------------------------------------------------------------------------------------------------
         # end training
 
+        #consolidate_weights(model, cur_class)
+        if opt.reg_lambda != 0:
+            update_ewc_data(model, model.ewcData, model.synData, 0.001, 1)
+
         if rank in [-1, 0]:
             # Strip optimizers
             n = opt.name if opt.name.isnumeric() else ''
@@ -465,7 +487,7 @@ if __name__ == '__main__':
     parser.add_argument('--logdir', type=str, default='runs/', help='logging directory')
     parser.add_argument('--log-imgs', type=int, default=10, help='number of images for W&B logging, max 100')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
-
+    parser.add_argument('--reg-lambda', type=float, default=0, help='reg lambda for SI for CL')
     opt = parser.parse_args()
 
     # Set DDP variables
