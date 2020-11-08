@@ -233,8 +233,14 @@ def test(data,
     pf = '%20s' + '%12.3g' * 6  # print format
     print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
 
+    # wandb.log({'metrics per class/precision': p,
+    #            'metrics per class/recall': r,
+    #            'metrics per class/ap50': ap50,
+    #            'metrics per class/ap[0.5:0.95]': ap})
+
     # Print results per class
     if verbose and nc > 1 and len(stats):
+
         for i, c in enumerate(ap_class):
             print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
 

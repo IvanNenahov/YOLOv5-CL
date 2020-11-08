@@ -47,7 +47,7 @@ def exif_size(img):
 
 
 def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
-                      rank=-1, world_size=1, workers=8):
+                      rank=-1, world_size=1, workers=8, n_batch=0):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache.
     with torch_distributed_zero_first(rank):
         dataset = LoadImagesAndLabels(path, imgsz, batch_size,
@@ -58,7 +58,8 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                       single_cls=opt.single_cls,
                                       stride=int(stride),
                                       pad=pad,
-                                      rank=rank)
+                                      rank=rank,
+                                      n_batch=n_batch)
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
@@ -327,7 +328,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, rank=-1):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, rank=-1, n_batch=0):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -336,6 +337,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
+        self.n_batch = n_batch
 
         def img2label_paths(img_paths):
             # Define label paths as a function of image paths
@@ -357,11 +359,17 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                     raise Exception('%s does not exist' % p)
             self.img_files = sorted(
                 [x.replace('/', os.sep) for x in f if os.path.splitext(x)[-1].lower() in img_formats])
+
+            # leave images according to CORE50 nic scenario
+            if self.n_batch != -1:
+                self.img_files = getimgs(self.img_files, self.n_batch)
+
             assert len(self.img_files) > 0, 'No images found'
         except Exception as e:
             raise Exception('Error loading data from %s: %s\nSee %s' % (path, e, help_url))
 
         # Check cache
+
         self.label_files = img2label_paths(self.img_files)  # labels
         cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
         if os.path.isfile(cache_path):
@@ -377,6 +385,11 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.labels = list(labels)
         self.shapes = np.array(shapes, dtype=np.float64)
         self.img_files = list(cache.keys())  # update
+
+
+
+
+
         self.label_files = img2label_paths(cache.keys())  # update
 
         n = len(shapes)  # number of images
@@ -943,3 +956,19 @@ def create_folder(path='./new'):
     if os.path.exists(path):
         shutil.rmtree(path)  # delete output folder
     os.makedirs(path)  # make new output folder
+
+
+def getimgs(img_files, n_batch):
+    # get images for CORE50 NIC scenario
+    ret_files = []
+
+    for f in img_files:
+        cl = f.split('_')[-2]
+        if n_batch == 0:
+            if int(cl) <= 10:
+                ret_files.append(f)
+        else:
+            if int(cl) == 10 + n_batch:
+                ret_files.append(f)
+
+    return ret_files
