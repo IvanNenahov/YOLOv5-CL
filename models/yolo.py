@@ -63,11 +63,15 @@ class Detect(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None):  # model, input channels, number of classes
+    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, latent_layer_num=0):  # model, input channels, number of classes
         super(Model, self).__init__()
 
         self.ewcData = None
         self.synData = None
+
+        self.past_j = {i: 0 for i in range(nc)}
+        self.cur_j = {i: 0 for i in range(nc)}
+
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
         else:  # is *.yaml
@@ -98,6 +102,22 @@ class Model(nn.Module):
         initialize_weights(self)
         self.info()
         print('')
+
+        all_layers = []
+        remove_sequential(self, all_layers)
+
+        lat_list = []
+        end_list = []
+
+        for i, layer in enumerate(all_layers[:-1]):
+            if i <= latent_layer_num:
+                lat_list.append(layer)
+            else:
+                end_list.append(layer)
+
+        self.lat_features = nn.Sequential(*lat_list)
+        self.end_features = nn.Sequential(*end_list)
+
 
     def forward(self, x, augment=False, profile=False):
         if augment:

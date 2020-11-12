@@ -190,7 +190,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                             workers=opt.workers,
                                             n_batch=-1)[0]
 
-    for core_batch in range(11):
+    for core_batch in range(11): #--------------CORe50 batch
         # Trainloader
 
         if opt.reg_lambda != 0:
@@ -201,6 +201,12 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                                 hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect,
                                                 rank=rank, world_size=opt.world_size, workers=opt.workers,
                                                 n_batch=core_batch)
+
+
+        if tb_writer:
+            tb_writer.add_scalar('number of x data', len(dataset), core_batch)
+
+        #model.cur_j = examples_per_class(dataset.labels, nc)
         mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
         nb = len(dataloader)  # number of batches
         assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (
@@ -209,14 +215,18 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         # Process 0
         if rank in [-1, 0]:
             ema.updates = start_epoch * nb // accumulate  # set EMA updates
-            testloader = create_dataloader(test_path, imgsz_test, total_batch_size, gs, opt,
+            testloader, test_dataset = create_dataloader(test_path, imgsz_test, total_batch_size, gs, opt,
                                            hyp=hyp, augment=False, cache=opt.cache_images and not opt.notest, rect=True,
                                            rank=-1, world_size=opt.world_size, workers=opt.workers,
-                                           n_batch=core_batch)[0]  # testloader
+                                           n_batch=core_batch)  # testloader
 
             if not opt.resume:
                 labels = np.concatenate(dataset.labels, 0)
                 c = torch.tensor(labels[:, 0])  # classes
+                print(set(c.numpy()))
+                t_labels = np.concatenate(test_dataset.labels, 0)
+                t_c = torch.tensor(t_labels[:, 0])  # classes
+                print(set(t_c.numpy()))
                 # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
                 # model._initialize_biases(cf.to(device))
                 plot_labels(labels, save_dir=log_dir)
@@ -245,6 +255,10 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         # update number of epochs to iterative training
         if core_batch != 0:
             epochs = opt.epochs_iter
+
+        labels = torch.tensor(np.concatenate(dataset.labels, 0)[:, 0])
+        cur_class = [int(o) for o in set(labels)]
+
 
         for epoch in range(start_epoch,
                            epochs):  # epoch ------------------------------------------------------------------
@@ -309,7 +323,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 # Forward
                 with amp.autocast(enabled=cuda):
                     pred = model(imgs)  # forward
-                    loss, loss_items = compute_loss(pred, targets.to(device), model)  # loss scaled by batch_size
+                    loss, loss_items = compute_loss(pred, targets.to(device), model, reg_lambda=opt.reg_lambda)  # loss scaled by batch_size
                     if rank != -1:
                         loss *= opt.world_size  # gradient averaged between devices in DDP mode
 
@@ -357,7 +371,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride'])
                 final_epoch = epoch + 1 == epochs
                 if not opt.notest or final_epoch:  # Calculate mAP
-                    results, maps, times = test.test(opt.data,
+                    results, maps, times, _ = test.test(opt.data,
                                                      batch_size=total_batch_size,
                                                      imgsz=imgsz_test,
                                                      model=ema.ema,
@@ -411,6 +425,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         # end training
 
         #consolidate_weights(model, cur_class)
+        #set_consolidate_weights(model)
         if opt.reg_lambda != 0:
             update_ewc_data(model, model.ewcData, model.synData, 0.001, 1)
 
@@ -431,7 +446,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 
         dist.destroy_process_group() if rank not in [-1, 0] else None
         torch.cuda.empty_cache()
-        results, maps, times = test.test(opt.data,
+        results, maps, times, r = test.test(opt.data,
                                          batch_size=total_batch_size,
                                          imgsz=imgsz_test,
                                          model=ema.ema,
@@ -449,7 +464,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         tags = [  # train loss
                 'test/precision', 'test/recall', 'test/mAP_0.5', 'test/mAP_0.5:0.95',
                 'test/giou_loss', 'test/obj_loss', 'test/cls_loss']  # params
-        for x, tag in zip(list(results), tags):
+        class_tags = [f'recall per class/{i + 1}' for i in range(nc)]
+        for x, tag in zip(list(results) + list(r), tags + class_tags):
             if tb_writer:
                 tb_writer.add_scalar(tag, x, core_batch)  # tensorboard
             if wandb:
@@ -487,7 +503,8 @@ if __name__ == '__main__':
     parser.add_argument('--logdir', type=str, default='runs/', help='logging directory')
     parser.add_argument('--log-imgs', type=int, default=10, help='number of images for W&B logging, max 100')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
-    parser.add_argument('--reg-lambda', type=float, default=0, help='reg lambda for SI for CL')
+    parser.add_argument('--reg-lambda', type=float, default=0.3, help='reg lambda for SI for CL')
+    parser.add_argument('--reset-weights', action='store_true', help='bool: reset weights for CL?')
     opt = parser.parse_args()
 
     # Set DDP variables
