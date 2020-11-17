@@ -67,7 +67,7 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
     dataloader = InfiniteDataLoader(dataset,
                                     batch_size=batch_size,
                                     num_workers=nw,
-                                    sampler=sampler,
+                        #            sampler=sampler,
                                     pin_memory=True,
                                     collate_fn=LoadImagesAndLabels.collate_fn)  # torch.utils.data.DataLoader()
     return dataloader, dataset
@@ -611,6 +611,14 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         return torch.from_numpy(img), labels_out, self.img_files[index], shapes
 
+    def get_all_data(self):
+        all_x = torch
+        x, y, _, _ = self.__getitem__(0)
+        for i in range(1, self.__len__()):
+            x_cur, y_cur, _, _ = self.__getitem__(i)
+            x, y = torch.cat((x, x_cur), 0), torch.cat((y, y_cur), 0)
+
+        return x, y
     @staticmethod
     def collate_fn(batch):
         img, label, path, shapes = zip(*batch)  # transposed

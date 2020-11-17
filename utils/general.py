@@ -541,6 +541,7 @@ def compute_loss(p, targets, model, reg_lambda=0):  # predictions, targets, mode
 
     loss = lbox + lobj + lcls
     if reg_lambda != 0:
+
         loss += compute_ewc_loss(model, model.ewcData, lambd=reg_lambda)
     return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
 
