@@ -24,7 +24,6 @@ from __future__ import absolute_import
 
 import numpy as np
 import torch
-from torch import nn
 from utils.batch_renorm import BatchRenorm2D
 
 def shuffle_in_unison(dataset, seed=None, in_place=False):
@@ -310,12 +309,9 @@ def reset_weights(model, cur_clas):
                 )
 
 
-def examples_per_class(train_y, total_classes):
-
-    y_cat = np.concatenate(train_y)[0]
-
-    count = {i:0 for i in range(total_classes)}
-    for y in y_cat:
+def examples_per_class(train_y):
+    count = {i:0 for i in range(50)}
+    for y in train_y:
         count[int(y)] +=1
 
     return count
@@ -369,7 +365,7 @@ def create_syn_data(model):
 
     for name, param in model.named_parameters():
         if "bn" not in name and "output" not in name:
-           # print(name, param.flatten().size(0))
+            print(name, param.flatten().size(0))
             size += param.flatten().size(0)
 
     # The first array returned is a 2D array: the first component contains
@@ -465,29 +461,6 @@ def compute_ewc_loss(model, ewcData, lambd=0):
     loss = (lambd / 2) * torch.dot(ewcData[1], (weights_vector - ewcData[0])**2)
     return loss
 
-
-def remove_sequential(network, all_layers):
-
-    for layer in network.children():
-        if isinstance(layer, nn.Sequential): # if sequential layer, apply recursively to layers in sequential layer
-            #print(layer)
-            remove_sequential(layer, all_layers)
-        else: # if leaf node, add it to list
-            # print(layer)
-            all_layers.append(layer)
-
-
-def remove_DwsConvBlock(cur_layers):
-
-    all_layers = []
-    for layer in cur_layers:
-        if isinstance(layer, DwsConvBlock):
-           #  print("helloooo: ", layer)
-            for ch in layer.children():
-                all_layers.append(ch)
-        else:
-            all_layers.append(layer)
-    return all_layers
 
 if __name__ == "__main__":
 

@@ -538,11 +538,10 @@ def compute_loss(p, targets, model, reg_lambda=0):  # predictions, targets, mode
     lcls *= h['cls'] * s
     bs = tobj.shape[0]  # batch size
 
-
-    loss = lbox + lobj + lcls
     if reg_lambda != 0:
+        ewcloss = compute_ewc_loss(model, model.ewcData, lambd=reg_lambda)
+    loss = lbox + lobj + lcls + ewcloss
 
-        loss += compute_ewc_loss(model, model.ewcData, lambd=reg_lambda)
     return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
 
 
