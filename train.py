@@ -31,7 +31,7 @@ from utils.general import (
 from utils.google_utils import attempt_download
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts
 from utils.ar1_utils import *
-
+from utils.datasets import externalMemory
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 def train(hyp, opt, device, tb_writer=None, wandb=None):
     logger.info(f'Hyperparameters {hyp}')
     log_dir = Path(tb_writer.log_dir) if tb_writer else Path(opt.logdir) / 'evolve'  # logging directory
-    wdir = log_dir / 'weights'  # weights directory
+    wdir = log_dir / 'weights'  # weights dfirectory
     os.makedirs(wdir, exist_ok=True)
     last = wdir / 'last.pt'
     best = wdir / 'best.pt'
@@ -110,10 +110,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):
             pg1.append(v.weight)  # apply decay
 
-    if opt.adam:
-        optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
-    else:
-        optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
+
+    optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
 
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
     optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
@@ -160,21 +158,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     gs = int(max(model.stride))  # grid size (max stride)
     imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
 
-    # DP mode
-    if cuda and rank == -1 and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
 
-    # SyncBatchNorm
-    if opt.sync_bn and cuda and rank != -1:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
-        logger.info('Using SyncBatchNorm()')
 
-    # Exponential moving average
-    ema = ModelEMA(model) if rank in [-1, 0] else None
 
-    # DDP mode
-    if cuda and rank != -1:
-        model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank)
 
     # Model parameters
     hyp['cls'] *= nc / 80.  # scale coco-tuned hyp['cls'] to current dataset
@@ -189,7 +175,23 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                                             rank=-1, world_size=opt.world_size,
                                             workers=opt.workers,
                                             n_batch=-1)[0]
+    
+    
+    root = 'G:/projects/core50_350_1f/batches/'
+    paths = os.listdir(root)
+    train_paths = []
+    valid_paths = []
 
+    for p in paths:
+        if 'train' in p:
+            train_paths.append(root + p)
+        elif 'val' in p:
+            valid_paths.append(root + p)
+        else:
+            print(p)
+
+           # external_memory = ext_memory()
+    extMem = externalMemory()
     for core_batch in range(11):
         # Trainloader
 
@@ -197,38 +199,46 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             init_batch(model, model.ewcData, model.synData)
 
         print(f'------------CORE50 itertaion №:{core_batch}------------')
+
+        external_files_path = extMem.file
+        if core_batch > 0:
+            train_path = [train_paths[core_batch], external_files_path]
+        else:
+            train_path = train_paths[core_batch]
+
+        extMem.update_memory(train_paths[core_batch], update_iters=10 if core_batch == 0 else 1)
+
         dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                                 hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect,
                                                 rank=rank, world_size=opt.world_size, workers=opt.workers,
-                                                n_batch=core_batch)
+                                                )
+
+
         mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
         nb = len(dataloader)  # number of batches
         assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (
             mlc, nc, opt.data, nc - 1)
 
-        # Process 0
-        if rank in [-1, 0]:
-            ema.updates = start_epoch * nb // accumulate  # set EMA updates
-            testloader = create_dataloader(test_path, imgsz_test, total_batch_size, gs, opt,
-                                           hyp=hyp, augment=False, cache=opt.cache_images and not opt.notest, rect=True,
-                                           rank=-1, world_size=opt.world_size, workers=opt.workers,
-                                           n_batch=core_batch)[0]  # testloader
 
-            if not opt.resume:
-                labels = np.concatenate(dataset.labels, 0)
-                c = torch.tensor(labels[:, 0])  # classes
-                # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
-                # model._initialize_biases(cf.to(device))
-                plot_labels(labels, save_dir=log_dir)
-                if tb_writer:
-                    # tb_writer.add_hparams(hyp, {})  # causes duplicate https://github.com/ultralytics/yolov5/pull/384
-                    tb_writer.add_histogram('classes', c, 0)
+        testloader = create_dataloader(valid_paths[core_batch], imgsz_test, total_batch_size, gs, opt,
+                                       hyp=hyp, augment=False, cache=opt.cache_images and not opt.notest, rect=True,
+                                       rank=-1, world_size=opt.world_size, workers=opt.workers
+                                       )[0]  # testloader
 
-                # Anchors
-                if not opt.noautoanchor:
-                    check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
+        #if not opt.resume:
+        labels = np.concatenate(dataset.labels, 0)
+        c = torch.IntTensor(labels[:, 0])  # classes
+        plot_labels(labels, save_dir=log_dir)
+        print(torch.bincount(c))
+        if tb_writer:
+            # tb_writer.add_hparams(hyp, {})  # causes duplicate https://github.com/ultralytics/yolov5/pull/384
+            tb_writer.add_histogram('classes', c, core_batch)
 
-        model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device)  # attach class weights
+            # Anchors
+            if not opt.noautoanchor:
+                check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
+
+        # model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device)  # attach class weights
         model.names = names
 
         # Start training
@@ -246,41 +256,40 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         if core_batch != 0:
             epochs = opt.epochs_iter
 
-        for epoch in range(start_epoch,
-                           epochs):  # epoch ------------------------------------------------------------------
+        # x_train, y_train = dataset.get_all_data()
+
+
+
+        for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
             model.train()
 
-            # Update image weights (optional)
-            if opt.image_weights:
-                # Generate indices
-                if rank in [-1, 0]:
-                    cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2  # class weights
-                    iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
-                    dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
-                # Broadcast if DDP
-                if rank != -1:
-                    indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
-                    dist.broadcast(indices, 0)
-                    if rank != 0:
-                        dataset.indices = indices.cpu().numpy()
-
-            # Update mosaic border
-            # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
-            # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
-
             mloss = torch.zeros(4, device=device)  # mean losses
-            if rank != -1:
-                dataloader.sampler.set_epoch(epoch)
-            pbar = enumerate(dataloader)
             logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'targets', 'img_size'))
-            if rank in [-1, 0]:
-                pbar = tqdm(pbar, total=nb)  # progress bar
+
+           # x_train_splitted = torch.split(x_train, 4)
+           # y_train_splitted = torch.split(y_train, 4)
+           # pbar = enumerate(zip(x_train_splitted, y_train_splitted))
+            pbar = enumerate(dataloader)
+            pbar = tqdm(pbar, total=nb)  # progress bar
             optimizer.zero_grad()
-            for i, (
-                    imgs, targets, paths,
-                    _) in pbar:  # batch -------------------------------------------------------------
+            for i, (imgs, targets, _, _) in pbar:  # batch -------------------------------------------------------------
+
+                # imgs = x_train[i * batch_size:(i + 1) * batch_size]
+                # targets = y_train[i * batch_size:(i + 1) * batch_size]
+                #
+                # # preprocess tensor to proper form
+                # # img, label = zip(imgs, targets)  # transposed
+                # for i, l in enumerate(targets):
+                #     l[:, 0] = i  # add target image index for build_targets()
+                # 
+                # imgs = torch.stack(imgs)
+                # targets = torch.cat(targets)
+
+
                 ni = i + nb * epoch  # number integrated batches (since train start)
                 imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+
+
 
                 if opt.reg_lambda != 0:
                     pre_update(model, model.synData)
@@ -297,22 +306,19 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                         if 'momentum' in x:
                             x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
 
-                # Multi-scale
-                if opt.multi_scale:
-                    sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
-                    sf = sz / max(imgs.shape[2:])  # scale factor
-                    if sf != 1:
-                        ns = [math.ceil(x * sf / gs) * gs for x in
-                              imgs.shape[2:]]  # new shape (stretched to gs-multiple)
-                        imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+                # # Multi-scale
+                # if opt.multi_scale:
+                #     sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
+                #     sf = sz / max(imgs.shape[2:])  # scale factor
+                #     if sf != 1:
+                #         ns = [math.ceil(x * sf / gs) * gs for x in
+                #               imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+                #         imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
                 # Forward
                 with amp.autocast(enabled=cuda):
                     pred = model(imgs)  # forward
                     loss, loss_items = compute_loss(pred, targets.to(device), model)  # loss scaled by batch_size
-                    if rank != -1:
-                        loss *= opt.world_size  # gradient averaged between devices in DDP mode
-
                 # Backward
                 scaler.scale(loss).backward()
 
@@ -325,24 +331,16 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 
                     scaler.update()
                     optimizer.zero_grad()
-                    if ema:
-                        ema.update(model)
+                    # if ema:
+                    #     ema.update(model)
 
                 # Print
-                if rank in [-1, 0]:
-                    mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
-                    mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                    s = ('%10s' * 2 + '%10.4g' * 6) % (
-                        '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
-                    pbar.set_description(s)
+                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
+                s = ('%10s' * 2 + '%10.4g' * 6) % (
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                pbar.set_description(s)
 
-                    # Plot
-                    if ni < 3:
-                        f = str(log_dir / f'train_batch{ni}.jpg')  # filename
-                        result = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
-                        # if tb_writer and result is not None:
-                        # tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
-                        # tb_writer.add_graph(model, imgs)  # add model to tensorboard
 
                 # end batch ------------------------------------------------------------------------------------------------
 
@@ -350,64 +348,60 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             lr = [x['lr'] for x in optimizer.param_groups]  # for tensorboard
             scheduler.step()
 
-            # DDP process 0 or single-GPU
-            if rank in [-1, 0]:
-                # mAP
-                if ema:
-                    ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride'])
-                final_epoch = epoch + 1 == epochs
-                if not opt.notest or final_epoch:  # Calculate mAP
-                    results, maps, times = test.test(opt.data,
-                                                     batch_size=total_batch_size,
-                                                     imgsz=imgsz_test,
-                                                     model=ema.ema,
-                                                     single_cls=opt.single_cls,
-                                                     dataloader=testloader,
-                                                     save_dir=log_dir,
-                                                     plots=epoch == 0 or final_epoch,  # plot first and last
-                                                     log_imgs=opt.log_imgs)
+            # mAP
+            results, maps, times = test.test(opt.data,
+                                             batch_size=total_batch_size,
+                                             imgsz=imgsz_test,
+                                             # model=ema.ema,
+                                             model=model,
+                                             single_cls=opt.single_cls,
+                                             dataloader=testloader,
+                                             save_dir=log_dir,
+                                             plots=epoch == 0,  # plot first and last
+                                             log_imgs=opt.log_imgs)
 
-                    # wandb.log({'per class/AP per class': maps})
+                # wandb.log({'per class/AP per class': maps})
 
-                # Write
-                with open(results_file, 'a') as f:
-                    f.write(s + '%10.4g' * 7 % results + '\n')  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
-                if len(opt.name) and opt.bucket:
-                    os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
+            # Write
+            with open(results_file, 'a') as f:
+                f.write(s + '%10.4g' * 7 % results + '\n')  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
+            if len(opt.name) and opt.bucket:
+                os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
 
-                # Log
-                tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
-                        'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
-                        'val/giou_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
-                        'x/lr0', 'x/lr1', 'x/lr2']  # params
-                for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
-                    if tb_writer:
-                        tb_writer.add_scalar(tag, x, epoch)  # tensorboard
-                    if wandb:
-                        wandb.log({tag: x})  # W&B
+            # Log
+            tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
+                    'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
+                    'val/giou_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
+                    'x/lr0', 'x/lr1', 'x/lr2']  # params
+            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
+                if tb_writer:
+                    tb_writer.add_scalar(tag, x, epoch)  # tensorboard
+                if wandb:
+                    wandb.log({tag: x})  # W&B
 
-                # Update best mAP
-                fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
-                if fi > best_fitness:
-                    best_fitness = fi
+            # Update best mAP
+            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+            if fi > best_fitness:
+                best_fitness = fi
 
-                # Save model
-                save = (not opt.nosave) or (final_epoch and not opt.evolve)
-                if save:
-                    with open(results_file, 'r') as f:  # create checkpoint
-                        ckpt = {'epoch': epoch,
-                                'best_fitness': best_fitness,
-                                'training_results': f.read(),
-                                'model': ema.ema,
-                                'optimizer': None if final_epoch else optimizer.state_dict(),
-                                'wandb_id': wandb_run.id if wandb else None}
+            # Save model
+            save = not opt.nosave
+            if save:
+                with open(results_file, 'r') as f:  # create checkpoint
+                    ckpt = {'epoch': epoch,
+                            'best_fitness': best_fitness,
+                            'training_results': f.read(),
+                            # 'model': ema.ema,
+                            'model': model,
+                            'optimizer': optimizer.state_dict(),
+                            'wandb_id': wandb_run.id if wandb else None}
 
-                    # Save last, best and delete
-                    torch.save(ckpt, last)
-                    if best_fitness == fi:
-                        torch.save(ckpt, best)
-                    del ckpt
-            # end epoch ----------------------------------------------------------------------------------------------------
+                # Save last, best and delete
+                torch.save(ckpt, last)
+                if best_fitness == fi:
+                    torch.save(ckpt, best)
+                del ckpt
+        # end epoch ----------------------------------------------------------------------------------------------------
         # end training
 
         #consolidate_weights(model, cur_class)
@@ -425,8 +419,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                         strip_optimizer(f2)  # strip optimizer
                         os.system('gsutil cp %s gs://%s/weights' % (f2, opt.bucket)) if opt.bucket else None  # upload
             # Finish
-            if not opt.evolve:
-                plot_results(save_dir=log_dir)  # save as results.png
+            plot_results(save_dir=log_dir)  # save as results.png
             logger.info('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
 
         dist.destroy_process_group() if rank not in [-1, 0] else None
@@ -434,7 +427,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         results, maps, times = test.test(opt.data,
                                          batch_size=total_batch_size,
                                          imgsz=imgsz_test,
-                                         model=ema.ema,
+                                         #model=ema.ema,
+                                         model=model,
                                          single_cls=opt.single_cls,
                                          dataloader=all_test_dataloader,
                                          save_dir=log_dir,
@@ -517,13 +511,6 @@ if __name__ == '__main__':
 
     # DDP mode
     device = select_device(opt.device, batch_size=opt.batch_size)
-    if opt.local_rank != -1:
-        assert torch.cuda.device_count() > opt.local_rank
-        torch.cuda.set_device(opt.local_rank)
-        device = torch.device('cuda', opt.local_rank)
-        dist.init_process_group(backend='nccl', init_method='env://')  # distributed backend
-        assert opt.batch_size % opt.world_size == 0, '--batch-size must be multiple of CUDA device count'
-        opt.batch_size = opt.total_batch_size // opt.world_size
 
     # Hyperparameters
     with open(opt.hyp) as f:
@@ -535,103 +522,21 @@ if __name__ == '__main__':
 
     # Train
     logger.info(opt)
-    if not opt.evolve:
-        tb_writer, wandb = None, None  # init loggers
-        if opt.global_rank in [-1, 0]:
-            # Tensorboard
-            logger.info(f'Start Tensorboard with "tensorboard --logdir {opt.logdir}", view at http://localhost:6006/')
-            tb_writer = SummaryWriter(log_dir=log_dir)  # runs/exp0
 
-            # W&B
-            try:
-                import wandb
+    tb_writer, wandb = None, None  # init loggers
+    # Tensorboard
+    logger.info(f'Start Tensorboard with "tensorboard --logdir {opt.logdir}", view at http://localhost:6006/')
+    tb_writer = SummaryWriter(log_dir=log_dir)  # runs/exp0
 
-                assert os.environ.get('WANDB_DISABLED') != 'true'
-                logger.info("Weights & Biases logging enabled, to disable set os.environ['WANDB_DISABLED'] = 'true'")
-            except (ImportError, AssertionError):
-                opt.log_imgs = 0
-                logger.info("Install Weights & Biases for experiment logging via 'pip install wandb' (recommended)")
+    # W&B
+    try:
+        import wandb
 
-        train(hyp, opt, device, tb_writer, wandb)
+        assert os.environ.get('WANDB_DISABLED') != 'true'
+        logger.info("Weights & Biases logging enabled, to disable set os.environ['WANDB_DISABLED'] = 'true'")
+    except (ImportError, AssertionError):
+            opt.log_imgs = 0
+            logger.info("Install Weights & Biases for experiment logging via 'pip install wandb' (recommended)")
 
-    # Evolve hyperparameters (optional)
-    else:
-        # Hyperparameter evolution metadata (mutation scale 0-1, lower_limit, upper_limit)
-        meta = {'lr0': (1, 1e-5, 1e-1),  # initial learning rate (SGD=1E-2, Adam=1E-3)
-                'lrf': (1, 0.01, 1.0),  # final OneCycleLR learning rate (lr0 * lrf)
-                'momentum': (0.3, 0.6, 0.98),  # SGD momentum/Adam beta1
-                'weight_decay': (1, 0.0, 0.001),  # optimizer weight decay
-                'warmup_epochs': (1, 0.0, 5.0),  # warmup epochs (fractions ok)
-                'warmup_momentum': (1, 0.0, 0.95),  # warmup initial momentum
-                'warmup_bias_lr': (1, 0.0, 0.2),  # warmup initial bias lr
-                'box': (1, 0.02, 0.2),  # box loss gain
-                'cls': (1, 0.2, 4.0),  # cls loss gain
-                'cls_pw': (1, 0.5, 2.0),  # cls BCELoss positive_weight
-                'obj': (1, 0.2, 4.0),  # obj loss gain (scale with pixels)
-                'obj_pw': (1, 0.5, 2.0),  # obj BCELoss positive_weight
-                'iou_t': (0, 0.1, 0.7),  # IoU training threshold
-                'anchor_t': (1, 2.0, 8.0),  # anchor-multiple threshold
-                'anchors': (2, 2.0, 10.0),  # anchors per output grid (0 to ignore)
-                'fl_gamma': (0, 0.0, 2.0),  # focal loss gamma (efficientDet default gamma=1.5)
-                'hsv_h': (1, 0.0, 0.1),  # image HSV-Hue augmentation (fraction)
-                'hsv_s': (1, 0.0, 0.9),  # image HSV-Saturation augmentation (fraction)
-                'hsv_v': (1, 0.0, 0.9),  # image HSV-Value augmentation (fraction)
-                'degrees': (1, 0.0, 45.0),  # image rotation (+/- deg)
-                'translate': (1, 0.0, 0.9),  # image translation (+/- fraction)
-                'scale': (1, 0.0, 0.9),  # image scale (+/- gain)
-                'shear': (1, 0.0, 10.0),  # image shear (+/- deg)
-                'perspective': (0, 0.0, 0.001),  # image perspective (+/- fraction), range 0-0.001
-                'flipud': (1, 0.0, 1.0),  # image flip up-down (probability)
-                'fliplr': (0, 0.0, 1.0),  # image flip left-right (probability)
-                'mosaic': (1, 0.0, 1.0),  # image mixup (probability)
-                'mixup': (1, 0.0, 1.0)}  # image mixup (probability)
+    train(hyp, opt, device, tb_writer, wandb)
 
-        assert opt.local_rank == -1, 'DDP mode not implemented for --evolve'
-        opt.notest, opt.nosave = True, True  # only test/save final epoch
-        # ei = [isinstance(x, (int, float)) for x in hyp.values()]  # evolvable indices
-        yaml_file = Path(opt.logdir) / 'evolve' / 'hyp_evolved.yaml'  # save best result here
-        if opt.bucket:
-            os.system('gsutil cp gs://%s/evolve.txt .' % opt.bucket)  # download evolve.txt if exists
-
-        for _ in range(300):  # generations to evolve
-            if os.path.exists('evolve.txt'):  # if evolve.txt exists: select best hyps and mutate
-                # Select parent(s)
-                parent = 'single'  # parent selection method: 'single' or 'weighted'
-                x = np.loadtxt('evolve.txt', ndmin=2)
-                n = min(5, len(x))  # number of previous results to consider
-                x = x[np.argsort(-fitness(x))][:n]  # top n mutations
-                w = fitness(x) - fitness(x).min()  # weights
-                if parent == 'single' or len(x) == 1:
-                    # x = x[random.randint(0, n - 1)]  # random selection
-                    x = x[random.choices(range(n), weights=w)[0]]  # weighted selection
-                elif parent == 'weighted':
-                    x = (x * w.reshape(n, 1)).sum(0) / w.sum()  # weighted combination
-
-                # Mutate
-                mp, s = 0.8, 0.2  # mutation probability, sigma
-                npr = np.random
-                npr.seed(int(time.time()))
-                g = np.array([x[0] for x in meta.values()])  # gains 0-1
-                ng = len(meta)
-                v = np.ones(ng)
-                while all(v == 1):  # mutate until a change occurs (prevent duplicates)
-                    v = (g * (npr.random(ng) < mp) * npr.randn(ng) * npr.random() * s + 1).clip(0.3, 3.0)
-                for i, k in enumerate(hyp.keys()):  # plt.hist(v.ravel(), 300)
-                    hyp[k] = float(x[i + 7] * v[i])  # mutate
-
-            # Constrain to limits
-            for k, v in meta.items():
-                hyp[k] = max(hyp[k], v[1])  # lower limit
-                hyp[k] = min(hyp[k], v[2])  # upper limit
-                hyp[k] = round(hyp[k], 5)  # significant digits
-
-            # Train mutation
-            results = train(hyp.copy(), opt, device)
-
-            # Write mutation results
-            print_mutation(hyp.copy(), results, yaml_file, opt.bucket)
-
-        # Plot results
-        plot_evolution(yaml_file)
-        print(f'Hyperparameter evolution complete. Best results saved as: {yaml_file}\n'
-              f'Command to train a new model with these hyperparameters: $ python train.py --hyp {yaml_file}')

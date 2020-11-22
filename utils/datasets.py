@@ -328,7 +328,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, rank=-1, n_batch=0):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, rank=-1, n_batch=-1):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -361,10 +361,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 [x.replace('/', os.sep) for x in f if os.path.splitext(x)[-1].lower() in img_formats])
 
             # leave images according to CORE50 nic scenario
-            if self.n_batch != -1:
-                self.img_files = getimgs(self.img_files, self.n_batch)
+            # if self.n_batch != -1:
+            #     self.img_files = getimgs(self.img_files, self.n_batch)
 
-            assert len(self.img_files) > 0, 'No images found'
+           # assert len(self.img_files) == 0, 'No images found'
         except Exception as e:
             raise Exception('Error loading data from %s: %s\nSee %s' % (path, e, help_url))
 
@@ -611,12 +611,29 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         return torch.from_numpy(img), labels_out, self.img_files[index], shapes
 
-    def get_all_data(self):
-        all_x = torch
-        x, y, _, _ = self.__getitem__(0)
-        for i in range(1, self.__len__()):
+    def get_all_data(self, shuffle=True):
+
+        #x, y, _, _ = self.__getitem__(0)
+        # x = torch.zeros((self.__len__(), 3, self.img_size, self.img_size), dtype=torch.float32)
+        # y = torch.zeros((self.__len__(), 1, 6), dtype=torch.float32)
+        #x = x.unsqueeze(0)
+        # y = y.unsqueeze(0)
+        x, y = [], []
+        idx = list(range(self.__len__()))
+        if shuffle:
+            np.random.shuffle(idx)
+
+        for i in tqdm(idx):
             x_cur, y_cur, _, _ = self.__getitem__(i)
-            x, y = torch.cat((x, x_cur), 0), torch.cat((y, y_cur), 0)
+            # x_cur = x_cur.unsqueeze(0)
+          #  y_cur = y_cur.unsqueeze(0)
+          #   x, y = torch.cat((x, x_cur), 0), torch.cat((y, y_cur), 0)
+            x.append(x_cur)
+            y.append(y_cur)
+
+            # x_cur = x_cur.permute(1, 2, 0).numpy()
+            # cv2.imshow('image', x_cur)
+            # cv2.waitKey()
 
         return x, y
     @staticmethod
@@ -643,6 +660,47 @@ def load_image(self, index):
         return img, (h0, w0), img.shape[:2]  # img, hw_original, hw_resized
     else:
         return self.imgs[index], self.img_hw0[index], self.img_hw[index]  # img, hw_original, hw_resized
+
+
+class externalMemory:
+    def __init__(self, size=500, name='ext_mem.txt'):
+        self.file = name
+        self.iterations = 0
+        self.size = size
+        self.rows = [''] * self.size
+
+
+    def update_memory(self, datafile, update_iters=1):
+        with open(datafile, 'r') as f:
+            new_data = f.readlines()
+
+        self.iterations += 1
+        h = self.size // self.iterations
+        h = min(h, len(new_data))
+
+        data_to_inject = np.random.choice(new_data, h, replace=False)
+        #data_to_inject = new_data[idx_to_add]
+
+        idx_to_replace = np.random.choice(list(range(self.size)), h, replace=False).astype(int)
+        #self.rows[idx_to_replace] = list(data_to_inject)
+
+        #print(np.count_nonzero(idx_to_replace))
+
+        for i, id in enumerate(idx_to_replace):
+            self.rows[id] = data_to_inject[i]
+           # print(i, np.count_nonzero(idx_to_replace == i))
+
+        with open(self.file, 'w') as f:
+            f.writelines(self.rows)
+
+        self.iterations += update_iters - 1
+
+
+
+
+
+
+
 
 
 def augment_hsv(img, hgain=0.5, sgain=0.5, vgain=0.5):
